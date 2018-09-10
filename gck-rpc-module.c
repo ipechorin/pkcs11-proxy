@@ -20,7 +20,6 @@
 
    Author: Stef Walter <stef@memberwebs.com>
 */
-
 #include "config.h"
 
 #include "gck-rpc-layer.h"
@@ -30,10 +29,12 @@
 #include "pkcs11/pkcs11.h"
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/param.h>
+#endif
 #ifdef __MINGW32__
 # include <winsock2.h>
-#else
+#elif !defined(_WIN32)
 # include <sys/socket.h>
 # include <sys/un.h>
 #include <arpa/inet.h>
@@ -46,23 +47,46 @@
 #include <limits.h>
 #include <ctype.h>
 #include <stdint.h>
+#ifndef _WIN32
 #include <pthread.h>
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <io.h>
 
 /* -------------------------------------------------------------------
  * GLOBALS / DEFINES
  */
 
 /* Various mutexes */
+#ifndef _WIN32
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
+#else
+static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT; // Static initialization
+static CRITICAL_SECTION init_mutex;
+
+// Initialization callback function 
+BOOL CALLBACK InitializeCS (
+    PINIT_ONCE InitOnce,       
+    PVOID Parameter,       
+    PVOID *lpContext)
+{
+    InitializeCriticalSection((LPCRITICAL_SECTION)lpContext);
+    return TRUE;
+}
+#endif
 
 /* Whether we've been initialized, and on what process id it happened */
 static int pkcs11_initialized = 0;
+#ifdef _WIN32
+#define pid_t int 
+#define getpid _getpid
+#include <process.h>
+#endif
 static pid_t pkcs11_initialized_pid = 0;
 static uint64_t pkcs11_app_id = 0;
 
@@ -84,8 +108,14 @@ static char tls_psk_key_filename[MAXPATHLEN] = { 0, };
 #endif
 #define warning(x) gck_rpc_warn x
 
+#if defined(_MSC_VER)
+#define GCK_RPC_CURRENT_FUNCTION __FUNCTION__
+#else
+#define GCK_RPC_CURRENT_FUNCTION __func__
+#endif
+
 #define return_val_if_fail(x, v) \
-	if (!(x)) { gck_rpc_warn ("'%s' not true at %s", #x, __func__); return v; }
+	if (!(x)) { gck_rpc_warn ("'%s' not true at %s", #x, GCK_RPC_CURRENT_FUNCTION); return v; }
 
 void gck_rpc_log(const char *msg, ...)
 {
@@ -218,7 +248,12 @@ static CallState *call_state_pool = NULL;
 static unsigned int n_call_state_pool = 0;
 
 /* Mutex to protect above call state list */
+#ifndef _WIN32
 static pthread_mutex_t call_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+#else
+static INIT_ONCE call_state_mutex_init_once = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION call_state_mutex;
+#endif
 
 /* Allocator for call session buffers */
 static void *call_allocator(void *p, size_t sz)
@@ -329,6 +364,9 @@ static int _connect_to_host_port(char *host, char *port)
 	char hoststr[NI_MAXHOST], portstr[NI_MAXSERV], hostport[NI_MAXHOST + NI_MAXSERV + 1];
 	struct addrinfo *ai, *first, hints;
 	int res, sock, one = 1;
+#ifdef _WIN32
+    HANDLE hd;
+#endif
 
 	memset(&hints, 0, sizeof(struct addrinfo));
 	hints.ai_family = AF_UNSPEC;		/* Either IPv4 or IPv6 */
@@ -371,12 +409,21 @@ static int _connect_to_host_port(char *host, char *port)
 			}
 
 #ifndef __MINGW32__
+#ifndef _WIN32
 			/* close on exec */
 			if (fcntl(sock, F_SETFD, 1) == -1) {
 				gck_rpc_warn("couldn't secure socket (%.100s): %.100s",
 					     hostport, strerror(errno));
 				goto next;
 			}
+#else // _WIN#2
+            hd = (HANDLE) _get_osfhandle(sock);
+            if (!SetHandleInformation(hd, HANDLE_FLAG_INHERIT, 0)) {
+                gck_rpc_warn("SetHandleInformation(HANDLE_FLAG_INHERIT, 0) (%.100s): %d",
+                    hostport, GetLastError());
+                goto next;
+            }
+#endif
 #endif
 
 			if (connect(sock, ai->ai_addr, ai->ai_addrlen) < 0) {
@@ -409,7 +456,9 @@ static int _connect_to_host_port(char *host, char *port)
 
 static CK_RV call_connect(CallState * cs)
 {
+#ifndef _WIN32
 	struct sockaddr_un addr;
+#endif
 	int sock;
 
 	assert(cs);
@@ -418,9 +467,9 @@ static CK_RV call_connect(CallState * cs)
 	assert(pkcs11_socket_path[0]);
 
 	debug(("connecting to: %s", pkcs11_socket_path));
-
+#ifndef _WIN32
 	memset(&addr, 0, sizeof(addr));
-
+#endif
 	if (! strncmp("tcp://", pkcs11_socket_path, 6) ||
 	    ! strncmp("tls://", pkcs11_socket_path, 6)) {
 		char *host, *port;
@@ -456,6 +505,7 @@ static CK_RV call_connect(CallState * cs)
 			}
 		}
 	} else {
+#ifndef _WIN32
 		addr.sun_family = AF_UNIX;
 		strncpy(addr.sun_path, pkcs11_socket_path,
 			sizeof(addr.sun_path));
@@ -482,6 +532,10 @@ static CK_RV call_connect(CallState * cs)
 				 strerror(errno)));
 			return CKR_DEVICE_ERROR;
 		}
+#else
+        warning(("UNIX socket unsupported, use tcp://"));
+        return CKR_DEVICE_ERROR;
+#endif
 	}
 
 	cs->socket = sock;
@@ -519,7 +573,12 @@ static CK_RV call_lookup(CallState ** ret)
 
 	assert(ret);
 
+#ifndef _WIN32
 	pthread_mutex_lock(&call_state_mutex);
+#else
+    InitOnceExecuteOnce(&call_state_mutex_init_once, InitializeCS, NULL, (LPVOID*)&call_state_mutex);
+    EnterCriticalSection(&call_state_mutex);
+#endif
 
 	/* Pop one from the pool if possible */
 	if (call_state_pool != NULL) {
@@ -530,7 +589,11 @@ static CK_RV call_lookup(CallState ** ret)
 		--n_call_state_pool;
 	}
 
+#ifndef _WIN32
 	pthread_mutex_unlock(&call_state_mutex);
+#else
+    LeaveCriticalSection(&call_state_mutex);
+#endif
 
 	if (cs == NULL) {
 		cs = calloc(1, sizeof(CallState));
@@ -746,7 +809,12 @@ static CK_RV call_done(CallState * cs, CK_RV ret)
 	    && cs->socket != -1) {
 
 		/* Try and stash it away for later use */
+#ifndef _WIN32
 		pthread_mutex_lock(&call_state_mutex);
+#else
+        InitOnceExecuteOnce(&call_state_mutex_init_once, InitializeCS, NULL, (LPVOID*)&call_state_mutex);
+        EnterCriticalSection(&call_state_mutex);
+#endif
 
 		if (n_call_state_pool < MAX_CALL_STATE_POOL) {
 			cs->call_status = CALL_READY;
@@ -756,8 +824,11 @@ static CK_RV call_done(CallState * cs, CK_RV ret)
 			++n_call_state_pool;
 			cs = NULL;
 		}
-
+#ifndef _WIN32
 		pthread_mutex_unlock(&call_state_mutex);
+#else
+        LeaveCriticalSection(&call_state_mutex);
+#endif
 	}
 
 	if (cs != NULL)
@@ -1298,7 +1369,12 @@ static CK_RV rpc_C_Initialize(CK_VOID_PTR init_args)
 	GCK_RPC_CHECK_CALLS();
 #endif
 
+#ifndef _WIN32
 	pthread_mutex_lock(&init_mutex);
+#else
+    InitOnceExecuteOnce(&init_once, InitializeCS, NULL, (LPVOID*)&init_mutex);
+    EnterCriticalSection(&init_mutex);
+#endif
 
 	if (init_args != NULL) {
 		int supplied_ok;
@@ -1414,9 +1490,11 @@ done:
 		pkcs11_initialized_pid = 0;
 		pkcs11_socket_path[0] = 0;
 	}
-
+#ifndef _WIN32
 	pthread_mutex_unlock(&init_mutex);
-
+#else
+    LeaveCriticalSection(&init_mutex);
+#endif
 	debug(("C_Initialize: %d", ret));
 	return ret;
 }
@@ -1429,8 +1507,12 @@ static CK_RV rpc_C_Finalize(CK_VOID_PTR reserved)
 	debug(("C_Finalize: enter"));
 	return_val_if_fail(! reserved, CKR_ARGUMENTS_BAD);
 	return_val_if_fail(pkcs11_initialized, CKR_CRYPTOKI_NOT_INITIALIZED);
-
+#ifndef _WIN32
 	pthread_mutex_lock(&init_mutex);
+#else
+    InitOnceExecuteOnce(&init_once, InitializeCS, NULL, (LPVOID*)&init_mutex);
+    EnterCriticalSection(&init_mutex);
+#endif
 
 	ret = call_lookup(&cs);
 	if (ret == CKR_OK) {
@@ -1448,8 +1530,11 @@ static CK_RV rpc_C_Finalize(CK_VOID_PTR reserved)
 	pkcs11_initialized = 0;
 	pkcs11_initialized_pid = 0;
 	pkcs11_socket_path[0] = 0;
-
+#ifndef _WIN32
 	pthread_mutex_unlock(&init_mutex);
+#else
+    LeaveCriticalSection(&init_mutex);
+#endif
 
 	debug(("C_Finalize: %d", CKR_OK));
 	return CKR_OK;

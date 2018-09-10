@@ -11,6 +11,23 @@
 //# define DEBUG_SECCOMP
 //# define SECCOMP
 
+#ifdef _WIN32
+
+#define _WIN32_WINNT 0x0600
+#include <WinSock2.h>
+#include <Windows.h>
+#include <ws2tcpip.h>
+#pragma comment (lib, "Ws2_32.lib")
+#ifndef MAXPATHLEN
+#define MAXPATHLEN 1024
+#endif
+#include <stdio.h>
+#ifdef _WIN32
+#define snprintf _snprintf
+#endif
+#endif
+
+
 #ifdef __MINGW32__
 
 # include <stdint.h>

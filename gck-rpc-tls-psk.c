@@ -26,14 +26,20 @@
 #include "gck-rpc-private.h"
 #include "gck-rpc-tls-psk.h"
 
+#ifndef _WIN32
 #include <sys/param.h>
+#endif
 #include <assert.h>
 
 /* for file I/O */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <io.h>
+#endif
 
 /* TLS pre-shared key */
 static char tls_psk_identity[128] = { 0, };
@@ -182,7 +188,9 @@ _tls_psk_server_cb(SSL *ssl, const char *identity,
 
 	debug(("Initializing TLS-PSK with keyfile '%.100s', identity '%.100s'",
 	       tls_psk_key_filename, identity));
-
+#ifndef O_CLOEXEC
+#define O_CLOEXEC _O_NOINHERIT
+#endif
 	if ((fd = open(tls_psk_key_filename, O_RDONLY | O_CLOEXEC)) < 0) {
 		gck_rpc_warn("can't open TLS-PSK keyfile '%.100s' for reading : %s",
 			     tls_psk_key_filename, strerror(errno));
