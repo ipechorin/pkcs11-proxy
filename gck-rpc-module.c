@@ -75,7 +75,7 @@ BOOL CALLBACK InitializeCS (
     PVOID Parameter,       
     PVOID *lpContext)
 {
-    InitializeCriticalSection((LPCRITICAL_SECTION)lpContext);
+    InitializeCriticalSection((LPCRITICAL_SECTION)Parameter);
     return TRUE;
 }
 #endif
@@ -372,7 +372,7 @@ static int _connect_to_host_port(char *host, char *port)
 	hints.ai_family = AF_UNSPEC;		/* Either IPv4 or IPv6 */
 	hints.ai_socktype = SOCK_STREAM;	/* Only stream oriented sockets */
 
-	if ((res = getaddrinfo(host, port, &hints, &ai)) < 0) {
+	if ((res = getaddrinfo(host, port, &hints, &ai)) != 0) {
 		gck_rpc_warn("couldn't resolve host '%.100s' or service '%.100s' : %.100s\n",
 			     host, port, gai_strerror(res));
 		return -1;
@@ -416,10 +416,9 @@ static int _connect_to_host_port(char *host, char *port)
 					     hostport, strerror(errno));
 				goto next;
 			}
-#else // _WIN#2
-            hd = (HANDLE) _get_osfhandle(sock);
-            if (!SetHandleInformation(hd, HANDLE_FLAG_INHERIT, 0)) {
-                gck_rpc_warn("SetHandleInformation(HANDLE_FLAG_INHERIT, 0) (%.100s): %d",
+#else // _WIN32
+			if (!SetHandleInformation((HANDLE)(UINT_PTR)sock, HANDLE_FLAG_INHERIT, FALSE)) {
+                gck_rpc_warn("SetHandleInformation(HANDLE_FLAG_INHERIT, FALSE) (%.100s): %d",
                     hostport, GetLastError());
                 goto next;
             }
@@ -576,7 +575,7 @@ static CK_RV call_lookup(CallState ** ret)
 #ifndef _WIN32
 	pthread_mutex_lock(&call_state_mutex);
 #else
-    InitOnceExecuteOnce(&call_state_mutex_init_once, InitializeCS, NULL, (LPVOID*)&call_state_mutex);
+    InitOnceExecuteOnce(&call_state_mutex_init_once, InitializeCS, (PVOID)&call_state_mutex, NULL);
     EnterCriticalSection(&call_state_mutex);
 #endif
 
@@ -812,7 +811,7 @@ static CK_RV call_done(CallState * cs, CK_RV ret)
 #ifndef _WIN32
 		pthread_mutex_lock(&call_state_mutex);
 #else
-        InitOnceExecuteOnce(&call_state_mutex_init_once, InitializeCS, NULL, (LPVOID*)&call_state_mutex);
+        InitOnceExecuteOnce(&call_state_mutex_init_once, InitializeCS, (PVOID)&call_state_mutex, NULL);
         EnterCriticalSection(&call_state_mutex);
 #endif
 
@@ -1362,6 +1361,11 @@ static CK_RV rpc_C_Initialize(CK_VOID_PTR init_args)
 	const char *path;
 	CallState *cs;
 	pid_t pid;
+#ifdef _WIN32
+	WORD wVersionRequested;
+	WSADATA wsaData;
+	int err;
+#endif
 
 	debug(("C_Initialize: enter"));
 
@@ -1372,8 +1376,15 @@ static CK_RV rpc_C_Initialize(CK_VOID_PTR init_args)
 #ifndef _WIN32
 	pthread_mutex_lock(&init_mutex);
 #else
-    InitOnceExecuteOnce(&init_once, InitializeCS, NULL, (LPVOID*)&init_mutex);
+	wVersionRequested = MAKEWORD(2, 2);
+	err = WSAStartup(wVersionRequested, &wsaData);
+	if (err != 0) {
+		warning(("WSAStartup failed: %d", err));
+		return CKR_GENERAL_ERROR;
+	}
+    InitOnceExecuteOnce(&init_once, InitializeCS, (PVOID)&init_mutex, NULL);
     EnterCriticalSection(&init_mutex);
+	
 #endif
 
 	if (init_args != NULL) {
@@ -1510,7 +1521,7 @@ static CK_RV rpc_C_Finalize(CK_VOID_PTR reserved)
 #ifndef _WIN32
 	pthread_mutex_lock(&init_mutex);
 #else
-    InitOnceExecuteOnce(&init_once, InitializeCS, NULL, (LPVOID*)&init_mutex);
+    InitOnceExecuteOnce(&init_once, InitializeCS, (PVOID)&init_mutex, NULL);
     EnterCriticalSection(&init_mutex);
 #endif
 
