@@ -19,6 +19,8 @@ if (WIN32)
   endif()
 endif()
 
+find_package(OpenSSL REQUIRED)
+
 add_executable (pkcs11-daemon ${GUI_TYPE} ${PKCS11_DAEMON_SRCS})
 
 set_target_properties(pkcs11-proxy PROPERTIES VERSION 0.1 SOVERSION 0)
@@ -29,12 +31,12 @@ if (WIN32)
   add_library(dl STATIC IMPORTED)
   set_property(TARGET dl PROPERTY
                IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/ext/lib/libdl.a)
-  target_link_libraries (pkcs11-daemon ws2_32)
-  target_link_libraries (pkcs11-proxy ws2_32)
+  target_link_libraries (pkcs11-daemon ws2_32 OpenSSL::SSL)
+  target_link_libraries (pkcs11-proxy ws2_32 OpenSSL::SSL)
+else ()
+  target_link_libraries (pkcs11-proxy pthread ssl crypto OpenSSL::SSL)
+  target_link_libraries (pkcs11-daemon dl pthread ssl crypto seccomp OpenSSL::SSL)
 endif (WIN32)
-
-target_link_libraries (pkcs11-proxy pthread ssl crypto)
-target_link_libraries (pkcs11-daemon dl pthread ssl crypto seccomp)
 
 install_targets (/lib pkcs11-proxy)
 install_targets (/bin pkcs11-daemon)
